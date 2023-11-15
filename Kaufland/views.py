@@ -6,7 +6,7 @@ from .models import KauflandAPI
 def getorders(request):
     try:
         kapi = KauflandAPI.objects.first()
-
+        test=  1
         kapi.createorders()
         context = {'message':'Orders created successfully'}
         return render(request,'simple.html',context=context)
