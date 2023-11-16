@@ -15,13 +15,12 @@ class GlobalSettings(models.Model):
 
 class MarketplaceOffer(models.Model):
 
-
-    def updatehandlingtime(self):
-        pass
-    def updatequantity(self):
-        pass
-    def updateprice(self):
-        pass
+    ean = models.CharField(max_length=20)
+    has_error = models.BooleanField(default=False)
+    currency = models.CharField(max_length=3)
+    message = models.TextField()
+    _handling_time = models.IntegerField()
+    last_update = models.DateField(auto_now=True)
 
     def updateoffer(self):
         pass
