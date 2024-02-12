@@ -6,3 +6,4 @@ from .models import *
 
 admin.site.register(KauflandAPI)
 admin.site.register(KauflandOffer)
+admin.site.register(KauflandShippingMethod)

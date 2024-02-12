@@ -7,11 +7,29 @@ import json
 import re
 # Create your models here.
 
+class SellAssistAdditionalFields(models.Model):
+    field_types = (
+        ('text','text'),
+    )
+    field_id = models.IntegerField()
+    field_type = models.CharField(max_length=4, choices=field_types, default='text')
+    name = models.CharField(max_length=200)
+
+
+    def return_json(self) -> dict:
+        obj_json = {}
+        obj_json['id'] = self.id
+        obj_json['field_value'] = ''
+        return obj_json
+
+
+
+
 
 class SellAssistAPI(models.Model):
     endpoint = models.CharField(max_length=200)
     apikey = models.CharField(max_length=200)
-
+    marketplace_field = models.ForeignKey(SellAssistAdditionalFields,on_delete=models.SET_NULL,default=None,null=True)
     def clean(self):
         apis = SellAssistAPI.objects.all()
 
@@ -53,6 +71,15 @@ class SellAssistAPI(models.Model):
         except Exception as Error:
             print(Error)
 
+
+    def getorders(self):
+        method='GET'
+        uri = '/orders'
+        body = ''
+        response = self.callapi(uri,body,method)
+        return response
+
+
     def getproductdata(self, product_id):
         method = 'GET'
         uri = f'/products/{product_id}'
@@ -65,50 +92,39 @@ class SellAssistAPI(models.Model):
         uri = '/products/'
         body = ''
         response = self.callapi(uri,body,method)
+        print(response)
         return response
 
-    def registerproducts(self):
-        products = self.getproductlist()
-        if products is not None:
-            if isinstance(products,list):
-                if len(products) > 0:
-                    for product in products:
-                        variants = product.get('variants')
-                        if variants is not None and len(variants)>0:
-                            self.registervariants(product)
-                        else:
-                            self.registersimple(product)
+    def getordershipmentdata(self,shipment_id):
+        method = 'GET'
+        uri = f'/ordersshipments?{shipment_id}'
+        body = ''
+        response = self.callapi(uri, body, method)
+        return response
 
-    def registervariants(self, product):
-        variants = product.get('variants')
-        for variant in variants:
-            ean = variant.get('ean')
-            if re.match(r'^\d{1,20}$', str(ean)):
-                try:
-                    SellAssistProduct.objects.get(ean=ean)
-                except SellAssistProduct.DoesNotExist:
-                    newproduct = SellAssistProduct()
-                    newproduct.ean = ean
-                    newproduct.variant_id = variant.get('id')
-                    newproduct.name = f'{product.get("name")}-{variant.get("id")}'
-                    newproduct.product_id = product.get('id')
-                    newproduct.sku = variant.get('catalog_number')
-                    newproduct.clean()
-                    newproduct.save()
+    def getordershipments(self,**params):
+        uri = '/ordersshipments'
+        if params is not None:
+            uri  = uri + '?'
+        params_list = ['order_id','limit','offset']
+        for element in params:
+            if element in params_list:
+                if params.get(element) is not None:
+                    uri = uri + f'{element}={params.get(element)}&'
+        method = 'GET'
 
-    def registersimple(self,product):
-        ean = product.get('ean')
-        if re.match(r'^\d{1,20}$', str(ean)):
-            try:
-                SellAssistProduct.objects.get(ean=ean)
-            except SellAssistProduct.DoesNotExist:
-                newproduct = SellAssistProduct()
-                newproduct.ean = ean
-                newproduct.name = product.get('name') if product.get('name') not in ['',None] else product.get('id')
-                newproduct.product_id = product.get('id')
-                newproduct.sku = product.get('catalog_number')
-                newproduct.clean()
-                newproduct.save()
+        body = ''
+        response = self.callapi(uri,body,method)
+        print(response)
+        return response
+
+    def getordersfields(self):
+        method = 'GET'
+        uri = '/orders_fields'
+        body = ''
+        response = self.callapi(uri, body, method)
+        return response
+
 
 
 class SellAssistPickupPoint(models.Model):
@@ -153,16 +169,13 @@ class SellAssistShipment(models.Model):
 
 class SellAssistProduct(models.Model):
     product_id = models.CharField(max_length=200)
-    variant_id = models.CharField(max_length=200)
+    variant_id = models.CharField(max_length=200,blank=True)
     name = models.CharField(max_length=200)
     ean = models.CharField(max_length=20)
     sku = models.CharField(max_length=20)
     is_bundle = models.BooleanField(default=False)
     bundle_id = models.IntegerField(default=0)
     quantity = models.FloatField(default=0)
-
-
-
 
 class SellAssistRegisteredProduct(SellAssistProduct):
     pass
@@ -249,7 +262,7 @@ class SellAssistOrder(models.Model):
     create = models.DateField(null=True)
     currency_code = models.CharField(max_length=3)
     payment_status = models.CharField(max_length=10, choices=payment_statues,default='unknown')
-    status = models.IntegerField()
+    status = models.IntegerField(default=1)
     date = models.CharField(max_length=200)
     shipment_price = models.FloatField()
     deadline = models.DateField()
@@ -257,21 +270,25 @@ class SellAssistOrder(models.Model):
     payment = models.ForeignKey(SellAssistPayment,on_delete=models.SET_NULL, null=True)
     shipment = models.ForeignKey(SellAssistShipment, on_delete=models.SET_NULL,null=True)
     invoice = models.BooleanField(default=False)
-    document_number = models.CharField(max_length=200)
-    comment = models.CharField(max_length=200)
+    document_number = models.CharField(max_length=200,blank=True)
+    comment = models.CharField(max_length=200,blank=True)
     bill_address = models.ForeignKey(SellAssistAddress,on_delete=models.SET_NULL,null=True,related_name='bill_address')
     shipment_address = models.ForeignKey(SellAssistAddress,on_delete=models.SET_NULL,null=True,related_name='shipment_address')
     marketplace_id = models.CharField(max_length=200,null=True)
-    sellassist_id = models.CharField(max_length=200, null=True)
+    sellassist_id = models.CharField(max_length=200, null=True,blank=True)
     registered = models.BooleanField(default=False)
     cancelled = models.BooleanField(default=False)
-    shipped = models.BooleanField(default=False)
+    has_shipment = models.BooleanField(default=False)
     has_errors = models.BooleanField(default=False)
     validated = models.BooleanField(default=False)
     messages = models.TextField(null=True,blank=True,default=None)
-    tracking_num = models.CharField(max_length=200,default='')
+    tracking_num = models.CharField(max_length=200,default='',blank=True)
     marketplace = models.CharField(max_length=200)
+    units = models.IntegerField()
 
+
+    def __str__(self):
+        return  f'{self.id} {self.marketplace}: {self.marketplace_id}'
     def return_json(self) -> dict:
         try:
             delivery_time = int(GlobalSettings.objects.get(name='default_delivery_time'))
@@ -297,23 +314,22 @@ class SellAssistOrder(models.Model):
         except GlobalSettings.DoesNotExist:
             default_shipment_id = None
 
-        try:
-            default_shipment = None
-            if default_shipment_id is not None:
-                default_shipment = SellAssistShipment.objects.get(shipment_id=default_shipment_id)
-        except SellAssistShipment.DoesNotExist:
-            default_shipment = None
+        # try:
+        #     default_shipment = None
+        #     if default_shipment_id is not None:
+        #         default_shipment = SellAssistShipment.objects.get(shipment_id=default_shipment_id)
+        # except SellAssistShipment.DoesNotExist:
+        #     default_shipment = None
 
         deadline = self.deadline - datetime.timedelta(days=delivery_time)
         obj_json = {}
 
         obj_json['currency'] = self.currency_code
-        obj_json['create'] = self.create.strftime('%Y-%m-%d %H:%M')
-        obj_json['date'] = {self.create.strftime('%Y-%m-%d %H:%M')}
+        obj_json['create'] = self.create.strftime('%Y-%m-%d %H:%M:%S')
+        obj_json['date'] = self.create.strftime('%Y-%m-%d %H:%M:%S')
         obj_json['id'] = self.marketplace_id
         obj_json['payment_status'] = self.payment_status if self.payment_statues != 'unknown' else 'unpaid'
         obj_json['status'] = self.status
-        obj_json['date'] = self.date
         obj_json['shipment_price'] = self.shipment_price
         obj_json['deadline'] = deadline.strftime('%Y-%m-%d') if deadline is not None else ''
         obj_json['important'] = self.important
@@ -335,16 +351,18 @@ class SellAssistOrder(models.Model):
         if self.shipment is not None:
             obj_json['shipment_id'] = self.shipment.shipment_id
             obj_json['shipment_name'] = self.shipment.title
-        elif default_shipment is not None:
-            obj_json['shipment_id'] = default_shipment.shipment_id
-            obj_json['shipment_name'] = default_shipment.title
-        else:
-            obj_json['shipment_id'] = 0
-            obj_json['shipment_name'] = 'Unknown'
+
+
+        # elif default_shipment is not None:
+        #     obj_json['shipment_id'] = default_shipment.shipment_id
+        #     obj_json['shipment_name'] = default_shipment.title
+        # else:
+        #     obj_json['shipment_id'] = 0
+        #     obj_json['shipment_name'] = 'Unknown'
 
 
         carts = SellAssistCart.objects.filter(order=self)
-        if len(carts)>0:
+        if len(carts) > 0:
             obj_json['carts'] = []
             for index, cart in enumerate(carts):
                 json_cart = cart.return_json()
@@ -390,8 +408,14 @@ class SellAssistOrder(models.Model):
     def registerorder(self):
         uri = '/orders/'
         method = 'POST'
-        json_data = json.dumps(self.return_json())
+        order_data = self.return_json()
         api = SellAssistAPI.objects.first()
+        if api.marketplace_field is not None:
+            if order_data.get('additional_fields') is None:
+                order_data['additional_fields'] = []
+                if self.marketplace not in ['',None]:
+                    order_data['additional_fields'].append( {'field_id':api.marketplace_field.field_id,'field_value':self.marketplace})
+        json_data = json.dumps(order_data)
 
         if not self.validated:
             self.validateorder()
@@ -411,6 +435,13 @@ class SellAssistOrder(models.Model):
 
         self.clean()
         self.save()
+
+    def getordershipment(self):
+        api = SellAssistAPI.objects.first()
+        if api is not None:
+            shipment = api.getordershipments(order_id=self.sellassist_id)
+
+
 
 
 

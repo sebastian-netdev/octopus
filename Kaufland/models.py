@@ -1,6 +1,6 @@
 from django.db import models
-from Octopus.models import GlobalSettings,MarketplaceOffer
 from SellAssist.models import *
+from Octopus.models import MarketplaceOffer
 # Create your models here.
 import hmac
 import hashlib
@@ -8,9 +8,8 @@ import time
 import requests
 import json
 import datetime
-
-
-
+from django.conf import settings
+from celery import shared_task
 
 class KauflandAPICallLog(models.Model):
     timestamp = models.DateField(auto_now=True)
@@ -37,8 +36,12 @@ class KauflandAPI(models.Model):
     def signrequest(self, method, uri, body, timestamp, secret_key):
         if body is None:
             body = ''
+
         try:
-            plain_text = "\n".join([method, uri, body, timestamp])
+            if isinstance(body, dict):
+                plain_text = "\n".join([method, uri, json.dumps(body), timestamp])
+            else:
+                plain_text = "\n".join([method, uri, body, timestamp])
             digest_maker = hmac.new(secret_key.encode(), None, hashlib.sha256)
             digest_maker.update(plain_text.encode())
             hmac_sign = digest_maker.hexdigest()
@@ -56,48 +59,83 @@ class KauflandAPI(models.Model):
         return url
 
     def callapi(self, uri, body, method, return_raw_response=False):
-        try:
-            timestamp = str(int(time.time()))
-            endpoint = self.endpoint
-            secretkey = self.secretkey
-            url = (endpoint + uri) if len(uri) > 0 else endpoint
-            headers = {}
-            headers['Accept'] = 'application/json'
-            headers['Shop-Client-Key'] = self.clientkey
-            headers['Shop-Timestamp'] = timestamp
-            headers['User-Agent'] = 'Inhouse_development'
-            if method == 'POST':
-                headers['Shop-Signature'] = self.signrequest(method, url, body, timestamp, secretkey)
-            elif method == 'GET':
-                url = self.preparegeturl(url,body)
-                headers['Shop-Signature'] = self.signrequest(method, url, '', timestamp, secretkey)
+        if settings.DEBUG:
+            try:
+                timestamp = str(int(time.time()))
+                endpoint = self.endpoint
+                secretkey = self.secretkey
+                url = (endpoint + uri) if len(uri) > 0 else endpoint
+                headers = {}
+                headers['Accept'] = 'application/json'
+                headers['Shop-Client-Key'] = self.clientkey
+                headers['Shop-Timestamp'] = timestamp
+                headers['User-Agent'] = 'Inhouse_development'
+                if method == 'POST':
+                    headers['Shop-Signature'] = self.signrequest(method, url, body, timestamp, secretkey)
+                elif method == 'GET':
+                    url = self.preparegeturl(url,body)
+                    headers['Shop-Signature'] = self.signrequest(method, url, '', timestamp, secretkey)
+                elif method == 'PATCH':
+                    headers['Shop-Signature'] = self.signrequest(method, url, body, timestamp, secretkey)
 
-            for element in headers:
-                if headers[element] is None:
-                    raise ValueError(f'One({element}) or more headers are None')
-            response = None
-            if method == 'GET':
-                response = requests.get(headers=headers, url=url)
+                for element in headers:
+                    if headers[element] is None:
+                        raise ValueError(f'One({element}) or more headers are None')
+                response = None
 
-            elif method == 'POST':
-                headers['Content-Type'] = 'application/json'
-                body = json.dumps(body)
-                response = requests.post(headers=headers,url=url,data=body)
-            if return_raw_response:
-                return response
-            if response.status_code in [200,201]:
-                return json.loads(response.text)
-            else:
-                print(response.text)
-                raise requests.exceptions.RequestException('Wrong response code!')
+                if method == 'GET':
+                    response = requests.get(headers=headers, url=url)
 
-        except KeyError as Error:
-            print(Error)
+                if method == 'POST':
+                    headers['Content-Type'] = 'application/json'
+                    body = json.dumps(body)
+                    response = requests.post(headers=headers,url=url,data=body)
+                if method == 'PATCH':
+                    headers['Content-Type'] = 'application/json'
+                    body = json.dumps(body)
+                    response = requests.patch(headers=headers,url=url,data=body)
+                if return_raw_response:
+                    return response
+                if response.status_code in [200,201]:
+                    return json.loads(response.text)
+                else:
+                    print(response.text)
+                    raise requests.exceptions.RequestException('Wrong response code!')
+
+            except KeyError as Error:
+                print(Error)
+        else:
+            return 'DEBUG'
 
     def updateoffer(self,body):
         uri = '/units/'
+        method = 'PATCH'
+        storefront = body.get('storefront')
+        id_unit = int(body.get('id_unit'))
+        uri = f'{uri}{id_unit}?storefront={storefront}'
+        del body['storefront']
+        del body['ean']
+        del body['id_unit']
+        del body['id_product']
+        del body['condition']
+        del body['id_offer']
+        response = self.callapi(uri,body,method)
+        return response
+
+    def getshippings(self):
+        uri = '/carriers'
+        method = 'GET'
+        body = ''
+        response = self.callapi(uri,body,method)
+        return response
+
+    def addnewoffer(self,body):
+        uri = '/units/'
         method = 'POST'
-        body = body
+        storefront = body.get('storefront')
+        id_unit = int(body.get('id_unit'))
+        uri = f'{uri}{id_unit}?storefront={storefront}'
+        del body['storefront']
         response = self.callapi(uri,body,method)
         return response
 
@@ -293,7 +331,14 @@ class KauflandAPI(models.Model):
 
 
     """Note that You can set as sent for every unit in order"""
-    def setassent(self,order_data, carrier_code,tracking):
+    def setassent(self,order):
+        marketplace_id = order.marketplace_id
+
+        if marketplace_id is not None:
+            order_data = self.getorderdata(marketplace_id)
+            if order_data is not None:
+                print(1)
+
         method = 'PATCH'
         for order_unit in order_data:
             id_order_unit = order_unit.get('id_order_unit')
@@ -309,12 +354,12 @@ class KauflandAPI(models.Model):
 
 class KauflandOffer(MarketplaceOffer):
     condition = (
-        ('new', 'NEW'),
-        ('used_as_new', 'USED___AS_NEW'),
+        ('NEW', 'new'),
+        ('USED___AS_NEW', 'used_as_new'),
     )
 
     status = (
-        ('available', 'AVAILVABLE'),
+        ('available', 'AVAILABLE'),
         ('onhold', 'ONHOLD'),
     )
 
@@ -326,28 +371,33 @@ class KauflandOffer(MarketplaceOffer):
 
     id_product = models.CharField(max_length=200)
     id_unit = models.CharField(max_length=200)
-    product = models.ForeignKey(SellAssistProduct, on_delete=models.SET_NULL, null=True, default=None)
+    product = models.ForeignKey(SellAssistRegisteredProduct, on_delete=models.SET_NULL, null=True, default=None,blank=True)
     condition = models.CharField(max_length=20,choices=condition, default='new')
     status = models.CharField(max_length=20,choices=status, default='available')
     _listing_price = models.FloatField()
     minimum_price = models.FloatField()
-    _amount = models.IntegerField()
-    note = models.CharField(max_length=50)
+    note = models.CharField(max_length=50,null=True,blank=True)
     id_offer = models.CharField(max_length=50)
     id_warehouse = models.CharField(max_length=20)
     id_shipping_group = models.CharField(max_length=20)
     storefront = models.CharField(max_length=2,choices=storefront)
 
+    # @property
+    # def handling_time(self):
+    #     return self._handling_time
+    #
+    # @handling_time.setter
+    # def handling_time(self,handling_time):
+    #     self._handling_time = handling_time
+    #     if handling_time != self._handling_time:
+    #         if not self.toupdate:
+    #             self.toupdate = True
+    #             self.save()
 
-    @property
-    def handling_time(self):
-        return self._handling_time
-
-    @handling_time.setter
-    def handling_time(self,handling_time):
-        self._handling_time = handling_time
-        if handling_time != self._handling_time:
-            self.updateoffer()
+    def clean(self):
+        super().clean()
+        if self.product is None:
+            self.toupdate = False
 
 
     @property
@@ -357,50 +407,51 @@ class KauflandOffer(MarketplaceOffer):
     @listing_price.setter
     def listing_price(self,listing_price):
         self._listing_price = listing_price
-        if listing_price != self._listing_price:
-            pass
-
-    @property
-    def amount(self):
-        return self._amount
-
-    @amount.setter
-    def amount(self,amount):
-        self._amount = amount
-        if amount != self._amount:
-            pass
+        if listing_price > 0:
+            if listing_price != self._listing_price:
+                if not self.toupdate:
+                    self.toupdate = True
+                    self.save()
 
 
     def return_json(self):
         obj_json = {}
-        obj_json['id_product'] = self.id_product
+        obj_json['id_product'] = int(self.id_product)
         obj_json['ean'] = self.ean
         obj_json['condition'] = self.condition
+        obj_json['id_unit'] = self.id_unit
         obj_json['listing_price'] = self.listing_price if self.listing_price == 0 else int(self.listing_price*100)
         obj_json['minimum_price'] = self.minimum_price if self.minimum_price == 0 else int(self.minimum_price*100)
-        obj_json['amount'] = self.amount
-        obj_json['note'] = self.note
+        obj_json['amount'] = self.quantity
         obj_json['id_offer'] = self.id_offer
         obj_json['handling_time'] = self.handling_time
         obj_json['id_warehouse'] = self.id_warehouse
         obj_json['id_shipping_group'] = self.id_shipping_group
-        obj_json['storefront'] = self.storefront
+        obj_json['storefront'] = str(self.storefront)
         return obj_json
 
     def updateoffer(self):
-        api = KauflandAPI.objects.first()
-        if api is not None:
-            offer_json = self.return_json()
-            if offer_json.get('listing_price') == 0:
-                del offer_json['listing_price']
-            if offer_json.get('minimum_price') == 0:
-                del offer_json['minimum_price']
+        if self.product is not None:
+            api = KauflandAPI.objects.first()
             try:
-                api.updateoffer(offer_json)
+                if api is not None:
+                    offer_json = self.return_json()
+                    # if offer_json.get('listing_price') == 0:
+                    #     del offer_json['listing_price']
+                    # if offer_json.get('minimum_price') == 0:
+                    #     del offer_json['minimum_price']
+                    api.updateoffer(offer_json)
+                    self.toupdate = False
+                    self.save()
             except Exception as Error:
+                self.toupdate = False
                 self.has_error = True
                 self.message = Error
                 self.save()
+
+
+
+
 
 
     def findproduct(self):
@@ -430,65 +481,31 @@ class KauflandOffer(MarketplaceOffer):
 
 
 
+class KauflandShippingMethod(models.Model):
+
+    name = models.CharField(max_length=200)
+    ishauler = models.BooleanField(default=False)
+    mapper = models.ForeignKey(SellAssistShipment,on_delete=models.SET_NULL,null=True)
 
 
-    def registeroffers(self):
+    def __str__(self):
+        return self.name
 
+    def registershipping(self):
         api = KauflandAPI.objects.first()
-
-
-        storefronts = api.getstorefronts()
-        storefronts_data = storefronts.get('data')
-        if storefronts_data is not None:
-            for storefront in storefronts_data:
-                total_offers = 1
-                if api:
-                    body = {}
-                    body['storefront'] = storefront
-                    body['limit'] = '1'
-                    downloaded = 0
-                    read = True
-                    while read:
-                        offers = api.getoffers(body)
-                        print(offers)
-                        if offers not in [None, '']:
-                            offers_data = offers.get('data')
-                            pagination = offers.get('pagination')
-                            if pagination is not None:
-                                #total_offers = pagination.get('total')
-                                offset = pagination.get('offset')
-                                if None not in [total_offers, offset, offers_data]:
-                                    if offers_data is not None:
-                                        for offer in offers_data:
-                                            downloaded +=1
-                                            try:
-                                                KauflandOffer.objects.get(id_unit=offer.get('id_unit'))
-                                            except KauflandOffer.DoesNotExist:
-                                                newoffer = KauflandOffer()
-                                                newoffer.id_product = offer.get('id_product')
-                                                newoffer.currency = offer.get('currency')
-                                                newoffer.id_unit = offer.get('id_unit')
-                                                newoffer.handling_time = offer.get('handling_time')
-                                                newoffer.id_warehouse = offer.get('id_warehouse')
-                                                newoffer.id_shipping_group = offer.get('id_shipping_group')
-                                                newoffer.id_offer = offer.get('id_offer')
-                                                newoffer.amount = offer.get('amount')
-                                                newoffer.status = offer.get('status')
-                                                newoffer.condition = offer.get('condition')
-                                                newoffer.storefront = offer.get('storefront')
-                                                newoffer.listing_price = float(offer.get('listing_price'))/100 if offer.get('listing_price') is not None else 0
-                                                newoffer.minimum_price = float(offer.get('minimum_price'))/100 if offer.get('minimum_price') is not None else 0
-                                                newoffer.note = offer.get('note') if offer.get('note') is not None else ''
-                                                newoffer.save()
-                                                newoffer.findproduct()
-
-                                if downloaded < total_offers:
-                                    body['offset'] = str(offset +1)
-                                else:
-                                    read = False
-
-
-
-
-
-
+        if api is not None:
+            shippings = api.getshippings()
+            if shippings is not None:
+                data = shippings.get('data').get('carriers')
+                if data is not None:
+                    for shipping in data:
+                        name = shipping.get('name')
+                        ishauler = shipping.get('isHauler')
+                        if None not in [name,ishauler]:
+                            try:
+                                KauflandShippingMethod.objects.get(name=name)
+                            except KauflandShippingMethod.DoesNotExist:
+                                newshipping = KauflandShippingMethod()
+                                newshipping.name = name
+                                newshipping.ishauler = ishauler
+                                newshipping.save()
